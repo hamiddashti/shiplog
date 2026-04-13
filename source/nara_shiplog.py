@@ -6,7 +6,7 @@ All functions for downloading Navy ship logs from the NARA Catalog API.
 Usage: import this module in a Jupyter notebook or script.
 
     from nara_shiplog import *
-    
+
     setup("nara_key.txt")
     index = build_index()
     result = download_record(169781174, "Log of U.S.S. SEMINOLE")
@@ -26,22 +26,40 @@ HEADERS = {}
 API_DELAY = 1.0
 DOWNLOAD_DELAY = 0.3
 OUTPUT_DIR = Path("shiplog_downloads")
+API_CALL_COUNT = 0
+API_MONTHLY_LIMIT = 150000
 
 
 def setup(key_file="nara_key.txt"):
     """Load API key and set up headers."""
-    global HEADERS
+    global HEADERS, API_CALL_COUNT
     key = open(key_file).read().strip()
     HEADERS = {
         "Content-Type": "application/json",
         "x-api-key": key,
     }
+    API_CALL_COUNT = 0
     print(f"API key loaded from {key_file}")
+
+
+def api_call_count():
+    """Return current API call count and remaining."""
+    remaining = API_MONTHLY_LIMIT - API_CALL_COUNT
+    print(f"API calls this session: {API_CALL_COUNT}")
+    print(f"Remaining (estimated): {remaining:,} / {API_MONTHLY_LIMIT:,}")
+    return API_CALL_COUNT
+
+
+def _track_call():
+    """Increment the API call counter."""
+    global API_CALL_COUNT
+    API_CALL_COUNT += 1
 
 
 # ==========================================================
 # INDEX FUNCTIONS
 # ==========================================================
+
 
 def fetch_index_page(query, offset, limit=100):
     """Fetch one page of search results from NARA API."""
@@ -55,6 +73,7 @@ def fetch_index_page(query, offset, limit=100):
     )
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
+    _track_call()
     return resp.json()
 
 
@@ -67,12 +86,12 @@ def parse_dates_from_title(title):
         "Log of U.S.S. HARTFORD: 1918"
     """
     # Pattern: M/D/YYYY - M/D/YYYY or M/D/YYYY-M/D/YYYY
-    match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})\s*-\s*(\d{1,2}/\d{1,2}/\d{4})', title)
+    match = re.search(r"(\d{1,2}/\d{1,2}/\d{4})\s*-\s*(\d{1,2}/\d{1,2}/\d{4})", title)
     if match:
         return match.group(1), match.group(2)
 
     # Pattern: just a year like ": 1918"
-    match = re.search(r':\s*(\d{4})\s*$', title)
+    match = re.search(r":\s*(\d{4})\s*$", title)
     if match:
         return match.group(1), match.group(1)
 
@@ -87,13 +106,13 @@ def parse_ship_name(title):
     "Rough Log of USS Ossipee, 11/18/1871" -> "USS Ossipee"
     """
     # Try "U.S.S. NAME" pattern
-    match = re.search(r'U\.?S\.?S\.?\s+([A-Za-z][A-Za-z\s\-]+)', title)
+    match = re.search(r"U\.?S\.?S\.?\s+([A-Za-z][A-Za-z\s\-]+)", title)
     if match:
         name = match.group(1).split(":")[0].split(",")[0].strip()
         return f"USS {name}"
 
     # Try "USS NAME" pattern
-    match = re.search(r'USS\s+([A-Za-z][A-Za-z\s\-]+)', title)
+    match = re.search(r"USS\s+([A-Za-z][A-Za-z\s\-]+)", title)
     if match:
         name = match.group(1).split(":")[0].split(",")[0].strip()
         return f"USS {name}"
@@ -122,7 +141,9 @@ def parse_hit(hit):
     # Try API date fields first
     start_date = rec.get("coverageStartDate", {})
     end_date = rec.get("coverageEndDate", {})
-    start_str = start_date.get("logicalDate", "") if isinstance(start_date, dict) else ""
+    start_str = (
+        start_date.get("logicalDate", "") if isinstance(start_date, dict) else ""
+    )
     end_str = end_date.get("logicalDate", "") if isinstance(end_date, dict) else ""
 
     # Fallback: parse dates from title
@@ -209,11 +230,13 @@ def load_index(csv_path="shiplog_index.csv"):
 # METADATA / TEXT / TRANSCRIPTION FUNCTIONS
 # ==========================================================
 
+
 def get_metadata(na_id):
     """Fetch record metadata from NARA API."""
     url = f"{BASE_URL}/api/v2/records/search?naId={na_id}"
     resp = requests.get(url, headers=HEADERS)
     resp.raise_for_status()
+    _track_call()
     data = resp.json()
     hits = data.get("body", {}).get("hits", {}).get("hits", [])
     if not hits:
@@ -222,15 +245,42 @@ def get_metadata(na_id):
 
 
 def get_extracted_text(na_id):
-    """Fetch all extracted text (OCR) for a record."""
-    url = f"{BASE_URL}/proxy/extractedText/{na_id}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"    Warning (extracted text): {e}")
-        return {"total": 0, "digitalObjects": []}
+    """Fetch all extracted text (OCR) for a record, paginating if needed."""
+    all_objects = []
+    page = 1
+    total = None
+
+    while True:
+        url = f"{BASE_URL}/proxy/extractedText/{na_id}?page={page}&limit=100"
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=30)
+            resp.raise_for_status()
+            _track_call()
+            data = resp.json()
+        except Exception as e:
+            print(f"    Warning (extracted text page {page}): {e}")
+            break
+
+        if total is None:
+            total = data.get("total", 0)
+
+        objects = data.get("digitalObjects", [])
+        if not objects:
+            break
+
+        all_objects.extend(objects)
+
+        if len(all_objects) >= total:
+            break
+
+        page += 1
+        time.sleep(0.5)
+
+    return {
+        "naId": str(na_id),
+        "total": total if total else 0,
+        "digitalObjects": all_objects,
+    }
 
 
 def get_transcriptions(na_id):
@@ -239,6 +289,7 @@ def get_transcriptions(na_id):
     try:
         resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
+        _track_call()
         return resp.json()
     except Exception as e:
         print(f"    Warning (transcriptions): {e}")
@@ -248,6 +299,7 @@ def get_transcriptions(na_id):
 # ==========================================================
 # DOWNLOAD FUNCTIONS
 # ==========================================================
+
 
 def download_file(url, dest_path):
     """Download a single file. Skip if already exists."""
@@ -269,8 +321,8 @@ def download_file(url, dest_path):
 
 def clean_folder_name(na_id, title):
     """Make a safe folder name."""
-    clean = re.sub(r'[^\w\s-]', '', title).strip()
-    clean = re.sub(r'\s+', '_', clean)
+    clean = re.sub(r"[^\w\s-]", "", title).strip()
+    clean = re.sub(r"\s+", "_", clean)
     return f"{na_id}_{clean}"[:120]
 
 
@@ -302,13 +354,19 @@ def download_record(na_id, title, skip_images=False, output_dir=None):
     if metadata is None:
         print(f"  No record found.")
         return {
-            "naId": na_id, "title": title,
-            "start_date": "", "end_date": "",
+            "naId": na_id,
+            "title": title,
+            "start_date": "",
+            "end_date": "",
             "nara_url": f"https://catalog.archives.gov/id/{na_id}",
             "local_dir": str(record_dir),
-            "num_images": 0, "has_pdf": False,
-            "has_extracted_text": False, "has_transcription": False,
-            "num_extracted_text": 0, "num_transcriptions": 0,
+            "num_images": 0,
+            "has_pdf": False,
+            "has_extracted_text": False,
+            "has_transcription": False,
+            "num_extracted_text_pages": 0,
+            "num_extracted_text_with_data": 0,
+            "num_transcriptions": 0,
             "download_status": "no_record",
         }
 
@@ -321,6 +379,11 @@ def download_record(na_id, title, skip_images=False, output_dir=None):
     print(f"  [2/3] Extracted text...")
     extracted = get_extracted_text(na_id)
     ext_total = extracted.get("total", 0)
+    ext_with_data = sum(
+        1
+        for obj in extracted.get("digitalObjects", [])
+        if obj.get("extractedText") is not None
+    )
     with open(record_dir / "extracted_text.json", "w") as f:
         json.dump(extracted, f, indent=2)
     time.sleep(API_DELAY)
@@ -329,11 +392,7 @@ def download_record(na_id, title, skip_images=False, output_dir=None):
     print(f"  [3/3] Transcriptions...")
     transcriptions = get_transcriptions(na_id)
     trans_total = (
-        transcriptions
-        .get("body", {})
-        .get("hits", {})
-        .get("total", {})
-        .get("value", 0)
+        transcriptions.get("body", {}).get("hits", {}).get("total", {}).get("value", 0)
     )
     with open(record_dir / "transcriptions.json", "w") as f:
         json.dump(transcriptions, f, indent=2)
@@ -367,7 +426,7 @@ def download_record(na_id, title, skip_images=False, output_dir=None):
                 failures += 1
 
             if (i + 1) % 10 == 0:
-                print(f"    {i+1}/{len(objects)} files...")
+                print(f"    {i + 1}/{len(objects)} files...")
 
             time.sleep(DOWNLOAD_DELAY)
 
@@ -384,7 +443,9 @@ def download_record(na_id, title, skip_images=False, output_dir=None):
     # 6. Dates
     start_date = record.get("coverageStartDate", {})
     end_date = record.get("coverageEndDate", {})
-    start_str = start_date.get("logicalDate", "") if isinstance(start_date, dict) else ""
+    start_str = (
+        start_date.get("logicalDate", "") if isinstance(start_date, dict) else ""
+    )
     end_str = end_date.get("logicalDate", "") if isinstance(end_date, dict) else ""
 
     done_flag.touch()
@@ -400,13 +461,16 @@ def download_record(na_id, title, skip_images=False, output_dir=None):
         "has_pdf": has_pdf,
         "has_extracted_text": ext_total > 0,
         "has_transcription": trans_total > 0,
-        "num_extracted_text": ext_total,
+        "num_extracted_text_pages": ext_total,
+        "num_extracted_text_with_data": ext_with_data,
         "num_transcriptions": trans_total,
         "download_status": status,
     }
 
-    print(f"  DONE: images={num_images}, pdf={has_pdf}, "
-          f"ocr={ext_total}, transcriptions={trans_total}, status={status}")
+    print(
+        f"  DONE: images={num_images}, pdf={has_pdf}, "
+        f"ocr={ext_with_data}/{ext_total}, transcriptions={trans_total}, status={status}"
+    )
 
     return result
 
@@ -416,10 +480,19 @@ def download_record(na_id, title, skip_images=False, output_dir=None):
 # ==========================================================
 
 MASTER_COLUMNS = [
-    "naId", "title", "start_date", "end_date", "nara_url",
-    "local_dir", "num_images", "has_pdf",
-    "has_extracted_text", "has_transcription",
-    "num_extracted_text", "num_transcriptions",
+    "naId",
+    "title",
+    "start_date",
+    "end_date",
+    "nara_url",
+    "local_dir",
+    "num_images",
+    "has_pdf",
+    "has_extracted_text",
+    "has_transcription",
+    "num_extracted_text_pages",
+    "num_extracted_text_with_data",
+    "num_transcriptions",
     "download_status",
 ]
 
@@ -461,7 +534,9 @@ def download_batch(index_rows, start=0, end=None, skip_images=False, output_dir=
         print(f"\n[{start + i + 1}/{end}] {na_id}: {title}")
 
         try:
-            result = download_record(na_id, title, skip_images=skip_images, output_dir=output_dir)
+            result = download_record(
+                na_id, title, skip_images=skip_images, output_dir=output_dir
+            )
             if result is None:
                 skipped += 1
             else:
@@ -475,6 +550,13 @@ def download_batch(index_rows, start=0, end=None, skip_images=False, output_dir=
             print(f"  ERROR: {e}")
             failed += 1
 
+        # Print API usage every 10 records
+        if (i + 1) % 10 == 0:
+            print(
+                f"\n  --- API calls so far: {API_CALL_COUNT:,} / {API_MONTHLY_LIMIT:,} ---"
+            )
+
     f.close()
     print(f"\nBatch done: success={success}, skipped={skipped}, failed={failed}")
+    print(f"API calls this session: {API_CALL_COUNT:,} / {API_MONTHLY_LIMIT:,}")
     print(f"Master CSV: {master_csv}")
