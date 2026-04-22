@@ -25,7 +25,9 @@ from pathlib import Path
 DATA_DIR = Path(
     "/project/rcc/users/hdashti/projects/shiplogs/oldweather/Cleaned_L2_Spreadsheets/"
 )
-OUTPUT_DIR = Path("/project/rcc/users/hdashti/projects/shiplogs/oldweather")
+OUTPUT_DIR = Path(
+    "/project/rcc/users/hdashti/projects/shiplogs/oldweather/oldweather_clean"
+)
 
 # ---------------------------------------------------------------------------
 # Column name mapping
@@ -77,6 +79,20 @@ COL_MAP = {
     "Orig_Course": "orig_course",
     "OrigCourse": "orig_course",
     " Orig Course": "orig_course",  # leading-space variant
+    # Ice observations
+    "Ice_Log": "ice_log",
+    "Ice_1": "ice_1",
+    "Ice_2": "ice_2",
+    "Ice 1": "ice_1",
+    "Ice 2": "ice_2",
+    "Ice1": "ice_1",
+    "Ice2": "ice_2",
+    "Ice_Index": "ice_index",
+    "Ice_Terms": "ice_terms",
+    # People, flora, fauna
+    "People": "people",
+    "Flora&Fauna": "flora_fauna",
+    "Animals": "animals",
 }
 
 # Columns to retain in the merged output (drop ice, fauna, refueling, etc.)
