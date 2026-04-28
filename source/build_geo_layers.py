@@ -1,3 +1,13 @@
+"""Build geo layers for Old Weather ship log data.
+
+Outputs (in /project/rcc/users/hdashti/projects/shiplogs/oldweather/geo/):
+    points/<Ship>_points.{parquet,geojson}   — one file per ship
+    tracks/<Ship>_tracks.{parquet,geojson}   — one file per ship
+    all_points.{parquet,geojson}             — combined across all ships
+    all_tracks.{parquet,geojson}             — combined across all ships
+    manifest.json                            — per-ship metadata
+"""
+
 import pandas as pd
 import numpy as np
 import geopandas as gpd
@@ -110,6 +120,8 @@ ships = sorted(df["ship"].unique())
 print(f"Loaded {len(df):,} rows, {len(ships)} ships\n")
 
 manifest = {"ships": []}
+all_points_gdfs = []
+all_tracks_gdfs = []
 t0 = time.time()
 
 for i, ship in enumerate(ships, 1):
@@ -136,6 +148,9 @@ for i, ship in enumerate(ships, 1):
     pts_geojson = f"{PTS_DIR}/{ship}_points.geojson"
     pts_json_gdf.to_file(pts_geojson, driver="GeoJSON")
 
+    # Collect for combined file (use string-datetime version)
+    all_points_gdfs.append(pts_json_gdf)
+
     # --- Tracks ---
     trk_gdf = build_tracks(s_geo)
     trk_parquet = f"{TRK_DIR}/{ship}_tracks.parquet"
@@ -143,9 +158,10 @@ for i, ship in enumerate(ships, 1):
     if len(trk_gdf) > 0:
         trk_gdf.to_parquet(trk_parquet)
         trk_gdf.to_file(trk_geojson, driver="GeoJSON")
+        all_tracks_gdfs.append(trk_gdf)
 
     # --- Manifest entry ---
-    bounds = pts_gdf.total_bounds  # minx, miny, maxx, maxy
+    bounds = pts_gdf.total_bounds
     manifest["ships"].append(
         {
             "ship": ship,
@@ -156,7 +172,7 @@ for i, ship in enumerate(ships, 1):
             "start_date": s_geo["datetime"].min().strftime("%Y-%m-%d"),
             "end_date": s_geo["datetime"].max().strftime("%Y-%m-%d"),
             "years": sorted(s_geo["datetime"].dt.year.unique().tolist()),
-            "bounds": [round(float(b), 4) for b in bounds],  # [W, S, E, N]
+            "bounds": [round(float(b), 4) for b in bounds],
             "n_track_segments": int(len(trk_gdf)),
             "total_track_nm": round(float(trk_gdf["distance_nm"].sum()), 1)
             if len(trk_gdf)
@@ -172,8 +188,46 @@ for i, ship in enumerate(ships, 1):
         f"[{i:2d}/{len(ships)}] {ship:15s} "
         f"pts={n_with_coords:>7,}  segs={len(trk_gdf):>4}  "
         f"geojson={manifest['ships'][-1]['pts_geojson_kb']:>8,.1f} KB  "
-        f"({elapsed:.1f}s elapsed)"
+        f"({elapsed:.1f}s)"
     )
+
+# ============================================================
+# Combined outputs
+# ============================================================
+print("\nBuilding combined files...")
+
+all_points = gpd.GeoDataFrame(
+    pd.concat(all_points_gdfs, ignore_index=True), crs="EPSG:4326"
+)
+# parquet wants datetime back as native type; keep geojson as string
+all_points_parquet = f"{OUT_DIR}/all_points.parquet"
+all_points_pq = all_points.copy()
+all_points_pq["datetime"] = pd.to_datetime(all_points_pq["datetime"])
+all_points_pq.to_parquet(all_points_parquet)
+print(
+    f"  all_points.parquet:  {os.path.getsize(all_points_parquet) / 1024 / 1024:>7.1f} MB  ({len(all_points):,} features)"
+)
+
+all_points_geojson = f"{OUT_DIR}/all_points.geojson"
+all_points.to_file(all_points_geojson, driver="GeoJSON")
+print(
+    f"  all_points.geojson:  {os.path.getsize(all_points_geojson) / 1024 / 1024:>7.1f} MB"
+)
+
+all_tracks = gpd.GeoDataFrame(
+    pd.concat(all_tracks_gdfs, ignore_index=True), crs="EPSG:4326"
+)
+all_tracks_parquet = f"{OUT_DIR}/all_tracks.parquet"
+all_tracks.to_parquet(all_tracks_parquet)
+print(
+    f"  all_tracks.parquet:  {os.path.getsize(all_tracks_parquet) / 1024 / 1024:>7.1f} MB  ({len(all_tracks):,} features)"
+)
+
+all_tracks_geojson = f"{OUT_DIR}/all_tracks.geojson"
+all_tracks.to_file(all_tracks_geojson, driver="GeoJSON")
+print(
+    f"  all_tracks.geojson:  {os.path.getsize(all_tracks_geojson) / 1024 / 1024:>7.1f} MB"
+)
 
 # --- Manifest ---
 manifest_path = f"{OUT_DIR}/manifest.json"
@@ -183,12 +237,9 @@ with open(manifest_path, "w") as f:
 print(f"\n{'=' * 60}")
 print(f"DONE in {time.time() - t0:.1f}s")
 print(f"Manifest: {manifest_path}")
-print(f"Points:   {PTS_DIR}/")
-print(f"Tracks:   {TRK_DIR}/")
 
-# Summary
-total_pts_gj = sum(s["pts_geojson_kb"] for s in manifest["ships"]) / 1024  # MB
+total_pts_gj = sum(s["pts_geojson_kb"] for s in manifest["ships"]) / 1024
 total_pts_pq = sum(s["pts_parquet_kb"] for s in manifest["ships"]) / 1024
 print(
-    f"\nTotal size — points GeoJSON: {total_pts_gj:.1f} MB  |  GeoParquet: {total_pts_pq:.1f} MB"
+    f"\nPer-ship totals — GeoJSON: {total_pts_gj:.1f} MB  GeoParquet: {total_pts_pq:.1f} MB"
 )

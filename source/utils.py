@@ -124,8 +124,23 @@ def load_raw(data_dir=None):
         if not ship_dir.is_dir():
             continue
         ship_name = ship_dir.name
+        # Skip _Ice.tsv files where _Ice_WX.tsv exists for the same year
+        # (Ice_WX is a strictly more complete transcription of the same hours)
+        tsv_files = sorted(ship_dir.glob("*.tsv"))
+        ice_wx_years = {
+            f.stem.replace("_Ice_WX", "")
+            for f in tsv_files
+            if f.stem.endswith("_Ice_WX")
+        }
+        tsv_files = [
+            f
+            for f in tsv_files
+            if not (
+                f.stem.endswith("_Ice") and f.stem.replace("_Ice", "") in ice_wx_years
+            )
+        ]
 
-        for f in sorted(ship_dir.glob("*.tsv")):
+        for f in tsv_files:
             try:
                 df = pd.read_csv(
                     f,
@@ -344,3 +359,40 @@ def load_parquet(filename="oldweather_cleaned.parquet", output_dir=None):
     df = pd.read_parquet(path)
     print(f"Loaded: {path} ({len(df):,} rows)")
     return df
+
+
+# ---------------------------------------------------------------------------
+# Deduplicate
+# ---------------------------------------------------------------------------
+def dedup(df):
+    """
+    Drop duplicate (ship, datetime) rows, keeping the earliest source_file.
+
+    Sorts by (ship, datetime, source_file) so 'first' is deterministic.
+    Prints before/after counts and per-ship drop summary.
+
+    Returns:
+        pd.DataFrame deduped on (ship, datetime).
+    """
+    before = len(df)
+    df_sorted = df.sort_values(["ship", "datetime", "source_file"]).reset_index(
+        drop=True
+    )
+    dedup = df_sorted.drop_duplicates(
+        subset=["ship", "datetime"], keep="first"
+    ).reset_index(drop=True)
+    after = len(dedup)
+
+    print(f"Before: {before:,} rows")
+    print(f"After:  {after:,} rows")
+    print(f"Dropped: {before - after:,} rows")
+
+    drops_by_ship = (
+        df_sorted.groupby("ship").size() - dedup.groupby("ship").size()
+    ).sort_values(ascending=False)
+    affected = drops_by_ship[drops_by_ship > 0]
+    if len(affected):
+        print(f"\nRows dropped per ship:")
+        print(affected)
+
+    return dedup
